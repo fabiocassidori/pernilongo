@@ -7,6 +7,13 @@
  * Adaptado: 12 sensores QRE1113 (antes 6), buffer DMA de NUM_CANAIS_ADC
  * posições (antes 8 fixas) e acionamento dos emissores IR por PA8.
  * A lógica de calibração, normalização e média ponderada é a original.
+ *
+ * PULSAGEM (SENSOR_PULSADO, ver config_robo.h): a cada leitura, os emissores
+ * da régua são ligados e desligados, e a posição é calculada sobre a
+ * DIFERENÇA (aceso - apagado) em vez do valor bruto do ADC. Isso cancela a
+ * contribuição da luz ambiente (sol, iluminação de teto), que soma igualmente
+ * nas duas fases e desaparece na subtração. Técnica padrão em seguidores de
+ * linha de alta performance.
  */
 
 #include "sensor_linha.h"
@@ -56,7 +63,11 @@ void sensor_linha_inicializar(ADC_HandleTypeDef *hadc) {
         g_valores_maximos[i] = 0;
     }
     g_ultimo_erro = SENSOR_POSICAO_CENTRO;
-#if EMISSORES_SEMPRE_ACESOS
+#if SENSOR_PULSADO
+    dwt_delay_init();
+    // Estado inicial aceso: a primeira leitura já alterna a partir daqui.
+    sensor_linha_definir_emissores(true);
+#elif EMISSORES_SEMPRE_ACESOS
     // Sem isto a régua fica apagada: os LEDs IR só acendem via Q5 (PA8).
     sensor_linha_definir_emissores(true);
 #endif
@@ -84,7 +95,7 @@ void sensor_linha_calibrar(void) {
 	// em que a corrida vai ler (ver SENSOR_PULSADO em config_robo.h).
 	atualizar_leitura_condicionada();
 	for (uint8_t j = 1; j <= NUM_SENSORES_LINHA; j++) {
-		uint16_t valor_atual = g_adc_buffer[j];
+		uint16_t valor_atual = g_valores_condicionados[j];
 		if (valor_atual < g_valores_minimos[j]) {
 			g_valores_minimos[j] = valor_atual;
 		}
@@ -113,7 +124,7 @@ void sensor_linha_calibrar(void) {
 }
 
 int sensor_linha_ler_posicao(void) {
-	atualizar_leitura_condicionada(); // pulsa os emissores e cancela luz ambiente (se SENSOR_PULSADO=1)
+    atualizar_leitura_condicionada(); // pulsa os emissores e cancela luz ambiente (se SENSOR_PULSADO=1)
     uint16_t normalizados[NUM_SENSORES_LINHA + 1];
     ler_e_normalizar(normalizados); // Normaliza de 0 a 1000
 
@@ -159,14 +170,14 @@ int sensor_linha_ler_posicao(void) {
 
 static void ler_e_normalizar(uint16_t* valores_normalizados) {
 	for (uint8_t i = 1; i <= NUM_SENSORES_LINHA; i++) {
-		uint16_t valor_cru = g_adc_buffer[i];
+		uint16_t valor_cru = g_valores_condicionados[i];
 
 		// Mantém o "clamp" para garantir que os valores estejam dentro do intervalo calibrado
 		if (valor_cru < g_valores_minimos[i]) valor_cru = g_valores_minimos[i];
 		if (valor_cru > g_valores_maximos[i]) valor_cru = g_valores_maximos[i];
 
 
-	#if SENSOR_PULSADO
+#if SENSOR_PULSADO
 		// g_valores_condicionados é |aceso-apagado| (ver atualizar_leitura_condicionada):
 		// magnitude da MUDANÇA causada pelo LED. Tem polaridade OPOSTA ao valor cru
 		// contínuo: quanto mais a superfície reflete (branco/linha), MAIOR a queda de
@@ -174,10 +185,10 @@ static void ler_e_normalizar(uint16_t* valores_normalizados) {
 		// Ou seja, aqui MÁXIMO = branco (linha) e MÍNIMO = preto — invertido em
 		// relação à leitura contínua abaixo. Mantém a mesma saída final (1000=linha).
 		valores_normalizados[i] = interpolar(valor_cru, g_valores_minimos[i], g_valores_maximos[i], 0, 1000);
-	#else
+#else
 		// Leitura contínua (sem pulsagem): o valor mínimo (branco) é 1000 e o máximo (preto) é 0.
 		valores_normalizados[i] = interpolar(valor_cru, g_valores_minimos[i], g_valores_maximos[i], 1000, 0);
-	#endif
+#endif
 	}
 }
 
@@ -217,11 +228,11 @@ bool sensor_linha_is_robo_fora_da_pista(int pos_mapeada) {
 }
 
 void sensor_linha_depuracao(void) {
-    printf("Dir:%4u |", g_adc_buffer[IDX_LATERAL_DIREITO]);
+    printf("Dir:%4u |", g_valores_condicionados[IDX_LATERAL_DIREITO]);
     for (uint8_t j = 1; j <= NUM_SENSORES_LINHA; j++) {
-        printf(" %4u", g_adc_buffer[j]);
+        printf(" %4u", g_valores_condicionados[j]);
     }
-    printf(" | Esq:%4u\r\n", g_adc_buffer[IDX_LATERAL_ESQUERDO]);
+    printf(" | Esq:%4u\r\n", g_valores_condicionados[IDX_LATERAL_ESQUERDO]);
 }
 
 #if SENSOR_PULSADO
@@ -313,5 +324,3 @@ void sensor_linha_depuracao_pulso(void) {
     printf("SENSOR_PULSADO=0: pulsagem desligada (config_robo.h)\r\n");
 #endif
 }
-
-
