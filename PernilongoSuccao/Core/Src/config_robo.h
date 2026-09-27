@@ -204,6 +204,27 @@
 #define PULSO_TEMPO_ESTAB_US 40
 
 /*
+ * Filtro de mediana (robustez complementar à pulsagem — não substitui).
+ *
+ * A pulsagem cancela luz ambiente CONSTANTE (sol, lâmpada), mas uma leitura
+ * pulsada isolada ainda pode sofrer com um pico de ruído elétrico/ótico
+ * (ex.: reflexo espúrio, chaveamento do motor). Técnica encontrada no
+ * projeto de referência analisado nesta conversa (LineSensor.cpp, Haruki
+ * Shimotori): mantém uma pequena janela de amostras recentes por sensor e
+ * usa a MEDIANA em vez da última amostra — descarta outliers isolados sem
+ * atrasar a resposta a uma mudança real e sustentada de posição.
+ *
+ * Lá a janela é de 10 amostras a cada 200 us (2 ms de profundidade), porque
+ * o ADC roda solto e contínuo. Aqui só há 1 amostra pulsada por ms, então
+ * uma janela de 3 (3 ms de profundidade) é a analogia proporcional — funciona
+ * mais rápido, mas rejeita picos de apenas 1 amostra (não sustentados).
+ * Precisa ser ÍMPAR.
+ */
+#define FILTRO_MEDIANA 1
+#define FILTRO_MEDIANA_JANELA 3
+
+
+/*
  * Usado somente se SENSOR_PULSADO=0 (fallback ao comportamento antigo:
  * emissores sempre acesos, sem cancelamento de luz ambiente).
  */

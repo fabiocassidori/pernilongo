@@ -7,6 +7,13 @@
  * Adaptado: 12 sensores QRE1113 (antes 6), buffer DMA de NUM_CANAIS_ADC
  * posições (antes 8 fixas) e acionamento dos emissores IR por PA8.
  * A lógica de calibração, normalização e média ponderada é a original.
+ *
+ * PULSAGEM (SENSOR_PULSADO, ver config_robo.h): a cada leitura, os emissores
+ * da régua são ligados e desligados, e a posição é calculada sobre a
+ * DIFERENÇA (aceso - apagado) em vez do valor bruto do ADC. Isso cancela a
+ * contribuição da luz ambiente (sol, iluminação de teto), que soma igualmente
+ * nas duas fases e desaparece na subtração. Técnica padrão em seguidores de
+ * linha de alta performance.
  */
 
 #include "sensor_linha.h"
@@ -29,6 +36,13 @@ static uint16_t g_valores_condicionados[NUM_CANAIS_ADC];
 static uint16_t g_dbg_aceso[NUM_CANAIS_ADC];
 static uint16_t g_dbg_apagado[NUM_CANAIS_ADC];
 #endif
+#if FILTRO_MEDIANA
+// Janela circular de amostras recentes por canal, para a mediana (ver
+// config_robo.h). Só os 12 QTR precisam (os laterais não são filtrados).
+static uint16_t g_janela[NUM_CANAIS_ADC][FILTRO_MEDIANA_JANELA];
+static uint8_t g_janela_idx[NUM_CANAIS_ADC];
+static uint8_t g_janela_cheia[NUM_CANAIS_ADC];
+#endif
 
 static uint16_t g_valores_minimos[NUM_SENSORES_LINHA + 1];
 static uint16_t g_valores_maximos[NUM_SENSORES_LINHA + 1];
@@ -44,6 +58,9 @@ static void atualizar_leitura_condicionada(void);
 void dwt_delay_init(void);      // weak — ver definição no fim do arquivo
 void delay_us(uint32_t us);     // weak — ver definição no fim do arquivo
 #endif
+#if FILTRO_MEDIANA
+static uint16_t mediana_filtrar(uint8_t canal, uint16_t nova_amostra);
+#endif
 
 void sensor_linha_definir_emissores(bool ligar) {
     HAL_GPIO_WritePin(PWM_SENSOR_GPIO_Port, PWM_SENSOR_Pin, ligar ? GPIO_PIN_SET : GPIO_PIN_RESET);
@@ -56,7 +73,11 @@ void sensor_linha_inicializar(ADC_HandleTypeDef *hadc) {
         g_valores_maximos[i] = 0;
     }
     g_ultimo_erro = SENSOR_POSICAO_CENTRO;
-#if EMISSORES_SEMPRE_ACESOS
+#if SENSOR_PULSADO
+    dwt_delay_init();
+    // Estado inicial aceso: a primeira leitura já alterna a partir daqui.
+    sensor_linha_definir_emissores(true);
+#elif EMISSORES_SEMPRE_ACESOS
     // Sem isto a régua fica apagada: os LEDs IR só acendem via Q5 (PA8).
     sensor_linha_definir_emissores(true);
 #endif
@@ -84,7 +105,7 @@ void sensor_linha_calibrar(void) {
 	// em que a corrida vai ler (ver SENSOR_PULSADO em config_robo.h).
 	atualizar_leitura_condicionada();
 	for (uint8_t j = 1; j <= NUM_SENSORES_LINHA; j++) {
-		uint16_t valor_atual = g_adc_buffer[j];
+		uint16_t valor_atual = g_valores_condicionados[j];
 		if (valor_atual < g_valores_minimos[j]) {
 			g_valores_minimos[j] = valor_atual;
 		}
@@ -113,7 +134,7 @@ void sensor_linha_calibrar(void) {
 }
 
 int sensor_linha_ler_posicao(void) {
-	atualizar_leitura_condicionada(); // pulsa os emissores e cancela luz ambiente (se SENSOR_PULSADO=1)
+    atualizar_leitura_condicionada(); // pulsa os emissores e cancela luz ambiente (se SENSOR_PULSADO=1)
     uint16_t normalizados[NUM_SENSORES_LINHA + 1];
     ler_e_normalizar(normalizados); // Normaliza de 0 a 1000
 
@@ -159,14 +180,14 @@ int sensor_linha_ler_posicao(void) {
 
 static void ler_e_normalizar(uint16_t* valores_normalizados) {
 	for (uint8_t i = 1; i <= NUM_SENSORES_LINHA; i++) {
-		uint16_t valor_cru = g_adc_buffer[i];
+		uint16_t valor_cru = g_valores_condicionados[i];
 
 		// Mantém o "clamp" para garantir que os valores estejam dentro do intervalo calibrado
 		if (valor_cru < g_valores_minimos[i]) valor_cru = g_valores_minimos[i];
 		if (valor_cru > g_valores_maximos[i]) valor_cru = g_valores_maximos[i];
 
 
-	#if SENSOR_PULSADO
+#if SENSOR_PULSADO
 		// g_valores_condicionados é |aceso-apagado| (ver atualizar_leitura_condicionada):
 		// magnitude da MUDANÇA causada pelo LED. Tem polaridade OPOSTA ao valor cru
 		// contínuo: quanto mais a superfície reflete (branco/linha), MAIOR a queda de
@@ -174,10 +195,10 @@ static void ler_e_normalizar(uint16_t* valores_normalizados) {
 		// Ou seja, aqui MÁXIMO = branco (linha) e MÍNIMO = preto — invertido em
 		// relação à leitura contínua abaixo. Mantém a mesma saída final (1000=linha).
 		valores_normalizados[i] = interpolar(valor_cru, g_valores_minimos[i], g_valores_maximos[i], 0, 1000);
-	#else
+#else
 		// Leitura contínua (sem pulsagem): o valor mínimo (branco) é 1000 e o máximo (preto) é 0.
 		valores_normalizados[i] = interpolar(valor_cru, g_valores_minimos[i], g_valores_maximos[i], 1000, 0);
-	#endif
+#endif
 	}
 }
 
@@ -217,11 +238,11 @@ bool sensor_linha_is_robo_fora_da_pista(int pos_mapeada) {
 }
 
 void sensor_linha_depuracao(void) {
-    printf("Dir:%4u |", g_adc_buffer[IDX_LATERAL_DIREITO]);
+    printf("Dir:%4u |", g_valores_condicionados[IDX_LATERAL_DIREITO]);
     for (uint8_t j = 1; j <= NUM_SENSORES_LINHA; j++) {
-        printf(" %4u", g_adc_buffer[j]);
+        printf(" %4u", g_valores_condicionados[j]);
     }
-    printf(" | Esq:%4u\r\n", g_adc_buffer[IDX_LATERAL_ESQUERDO]);
+    printf(" | Esq:%4u\r\n", g_valores_condicionados[IDX_LATERAL_ESQUERDO]);
 }
 
 #if SENSOR_PULSADO
@@ -289,7 +310,11 @@ static void atualizar_leitura_condicionada(void) {
         // feita sobre este mesmo valor, adapta min/max normalmente.
         int32_t diferenca = (int32_t)g_dbg_aceso[i] - (int32_t)g_dbg_apagado[i];
         if (diferenca < 0) diferenca = -diferenca;
+#if FILTRO_MEDIANA
+        g_valores_condicionados[i] = mediana_filtrar(i, (uint16_t)diferenca);
+#else
         g_valores_condicionados[i] = (uint16_t)diferenca;
+#endif
     }
     // Laterais: RPR-220 com LED sempre aceso, não afetado por PA8. Copia direto.
     g_valores_condicionados[IDX_LATERAL_DIREITO] = g_dbg_aceso[IDX_LATERAL_DIREITO];
@@ -304,7 +329,7 @@ static void atualizar_leitura_condicionada(void) {
 void sensor_linha_depuracao_pulso(void) {
 #if SENSOR_PULSADO
     atualizar_leitura_condicionada();
-    printf("QTR  aceso apagado diff\r\n");
+    printf("QTR  aceso apagado final\r\n");
     for (uint8_t i = 1; i <= NUM_SENSORES_LINHA; i++) {
         printf("%02u   %4u   %4u   %4u\r\n",
                NUM_SENSORES_LINHA + 1 - i, g_dbg_aceso[i], g_dbg_apagado[i], g_valores_condicionados[i]);
@@ -314,4 +339,31 @@ void sensor_linha_depuracao_pulso(void) {
 #endif
 }
 
+#if FILTRO_MEDIANA
+/*
+ * Insere nova_amostra na janela circular do canal e devolve a MEDIANA das
+ * últimas FILTRO_MEDIANA_JANELA amostras (ver explicação em config_robo.h).
+ * Janela pequena (tipicamente 3): ordena por inserção, custo desprezível.
+ * Enquanto a janela não está cheia (primeiras leituras após o boot), usa a
+ * mediana só das amostras já recebidas, para não atrasar a primeira leitura.
+ */
+static uint16_t mediana_filtrar(uint8_t canal, uint16_t nova_amostra) {
+    uint8_t idx = g_janela_idx[canal];
+    g_janela[canal][idx] = nova_amostra;
+    g_janela_idx[canal] = (uint8_t)((idx + 1) % FILTRO_MEDIANA_JANELA);
+    if (!g_janela_cheia[canal] && g_janela_idx[canal] == 0) {
+        g_janela_cheia[canal] = 1;
+    }
+    uint8_t n = g_janela_cheia[canal] ? FILTRO_MEDIANA_JANELA : (uint8_t)(idx + 1);
 
+    uint16_t tmp[FILTRO_MEDIANA_JANELA];
+    for (uint8_t k = 0; k < n; k++) tmp[k] = g_janela[canal][k];
+    for (uint8_t a = 1; a < n; a++) {           // insertion sort: n é pequeno (3-5)
+        uint16_t chave = tmp[a];
+        int8_t b = (int8_t)(a - 1);
+        while (b >= 0 && tmp[b] > chave) { tmp[b + 1] = tmp[b]; b--; }
+        tmp[b + 1] = chave;
+    }
+    return tmp[n / 2];
+}
+#endif
