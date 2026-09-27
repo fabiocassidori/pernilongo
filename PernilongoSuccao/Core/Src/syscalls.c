@@ -37,12 +37,22 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 
+/* Espelhamento do printf no Bluetooth. Não incluir o HAL aqui: o core_cm4.h
+ * (CMSIS) declara ITM_SendChar e um campo DEMCR, que colidem com as definições
+ * deste arquivo. Por isso só a função necessária é declarada. */
+#include <stdint.h>
+#include "config_robo.h"
+extern void bt_enviar(const uint8_t *dados, uint16_t tamanho);
+
 //Debug Exception and Monitor Control Register base address
 #define DEMCR        			*((volatile uint32_t*) 0xE000EDFCU )
 
 /* ITM register addresses */
 #define ITM_STIMULUS_PORT0   	*((volatile uint32_t*) 0xE0000000 )
 #define ITM_TRACE_EN          	*((volatile uint32_t*) 0xE0000E00 )
+
+/* ITM Trace Control Register (bit 0 = ITMENA, ligado pelo depurador com SWV ativo) */
+#define ITM_TRACE_CTRL        	*((volatile uint32_t*) 0xE0000E80 )
 
 void ITM_SendChar(uint8_t ch)
 {
@@ -52,6 +62,10 @@ void ITM_SendChar(uint8_t ch)
 
 	//enable stimulus port 0
 	ITM_TRACE_EN |= ( 1 << 0);
+
+	// Sem depurador com SWV ativo o ITM fica desabilitado e o FIFO nunca fica
+	// pronto: sai sem enviar em vez de travar (mesma checagem do CMSIS).
+	if ((ITM_TRACE_CTRL & 1U) == 0U) return;
 
 	// read FIFO status in bit [0]:
 	while(!(ITM_STIMULUS_PORT0 & 1));
@@ -115,8 +129,12 @@ __attribute__((weak)) int _write(int file, char *ptr, int len)
   for (DataIdx = 0; DataIdx < len; DataIdx++)
   {
     //__io_putchar(*ptr++);
-    ITM_SendChar(*ptr++);
+    ITM_SendChar(ptr[DataIdx]);
   }
+#if BT_ESPELHAR_PRINTF
+  // Espelha a saída do printf no módulo Bluetooth (J5 / USART1)
+  bt_enviar((const uint8_t *)ptr, (uint16_t)len);
+#endif
   return len;
 }
 

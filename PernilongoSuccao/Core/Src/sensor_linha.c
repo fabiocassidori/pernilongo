@@ -3,17 +3,23 @@
  *
  *  Created on: Jun 5, 2025
  *      Author: Fábio Couto
+ *
+ * Adaptado: 12 sensores QRE1113 (antes 6), buffer DMA de NUM_CANAIS_ADC
+ * posições (antes 8 fixas) e acionamento dos emissores IR por PA8.
+ * A lógica de calibração, normalização e média ponderada é a original.
  */
 
 #include "sensor_linha.h"
 #include "config_robo.h"
+#include "main.h"
 #include "interface_usuario.h"
 #include "marcador_lateral.h"
 #include <stdio.h>
 #include <stdlib.h>
 
 static ADC_HandleTypeDef *g_hadc = NULL;
-static volatile uint16_t g_adc_buffer[8];
+// Índice 0 = lateral direito, 1..NUM_SENSORES_LINHA = régua, último = lateral esquerdo
+static volatile uint16_t g_adc_buffer[NUM_CANAIS_ADC];
 
 static uint16_t g_valores_minimos[NUM_SENSORES_LINHA + 1];
 static uint16_t g_valores_maximos[NUM_SENSORES_LINHA + 1];
@@ -25,13 +31,22 @@ static volatile int g_contador_linha_perdida_ms = 0;
 static uint16_t interpolar(uint16_t valor, uint16_t entrada_min, uint16_t entrada_max, uint16_t saida_min, uint16_t saida_max);
 static void ler_e_normalizar(uint16_t* valores_normalizados);
 
+void sensor_linha_definir_emissores(bool ligar) {
+    HAL_GPIO_WritePin(PWM_SENSOR_GPIO_Port, PWM_SENSOR_Pin, ligar ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
 void sensor_linha_inicializar(ADC_HandleTypeDef *hadc) {
     g_hadc = hadc;
     for (int i = 0; i <= NUM_SENSORES_LINHA; i++) {
         g_valores_minimos[i] = (uint16_t)ADC_VALOR_MAXIMO;
         g_valores_maximos[i] = 0;
     }
-    HAL_ADC_Start_DMA(g_hadc, (uint32_t*)g_adc_buffer, 8);
+    g_ultimo_erro = SENSOR_POSICAO_CENTRO;
+#if EMISSORES_SEMPRE_ACESOS
+    // Sem isto a régua fica apagada: os LEDs IR só acendem via Q5 (PA8).
+    sensor_linha_definir_emissores(true);
+#endif
+    HAL_ADC_Start_DMA(g_hadc, (uint32_t*)g_adc_buffer, NUM_CANAIS_ADC);
 }
 
 void sensor_linha_calibrar(void) {
@@ -47,7 +62,7 @@ void sensor_linha_calibrar(void) {
 	iu_bip_bloqueante(100);
 	HAL_Delay(100);
 
-	// O loop de calibração dura (CICLOS_CALIBRACAO * 50ms) segundos
+	// O loop de calibração dura (CICLOS_CALIBRACAO * DELAY_CALIBRACAO) ms
 	for (uint16_t i = 0; i < CICLOS_CALIBRACAO; i++) {
 	// A cada ciclo, atualiza os valores mínimos e máximos para cada sensor
 	// começa em 1 pois g_adc_buffer 1 a NUM_SENSORES_LINHA são os sensores QTR.
@@ -68,10 +83,11 @@ void sensor_linha_calibrar(void) {
 	printf("Calibracao finalizada.\r\n");
 
 	// Log para exibir os resultados da calibração para cada sensor.
+	// Índice 1 = QTR12 (direita) ... índice 12 = QTR01 (esquerda).
 	printf("--- Resultados da Calibracao do Sensor de Linha ---\r\n");
 		for (uint8_t j = 1; j <= NUM_SENSORES_LINHA; j++) {
-			// Imprime o número do sensor, o valor mínimo (branco) e máximo (preto) encontrados.
-			printf("Sensor %d | Min: %u | Max: %u\r\n", j, g_valores_minimos[j], g_valores_maximos[j]);
+			// Imprime o sensor (numeração da placa), o mínimo (branco) e o máximo (preto).
+			printf("QTR%02d | Min: %u | Max: %u\r\n", NUM_SENSORES_LINHA + 1 - j, g_valores_minimos[j], g_valores_maximos[j]);
 		}
 	printf("---------------------------------------------------\r\n");
 
@@ -81,7 +97,7 @@ void sensor_linha_calibrar(void) {
 
 int sensor_linha_ler_posicao(void) {
     uint16_t normalizados[NUM_SENSORES_LINHA + 1];
-    ler_e_normalizar(normalizados); // Agora normaliza de 0 a 1000
+    ler_e_normalizar(normalizados); // Normaliza de 0 a 1000
 
     g_esta_na_linha = false;
 
@@ -106,19 +122,19 @@ int sensor_linha_ler_posicao(void) {
 
     if (!g_esta_na_linha) {
         // Se nenhum sensor vê a linha, decide para que lado o robô "provavelmente" saiu
-        // e retorna o valor mínimo (0) ou máximo (5000).
-        // O valor 2500 é o ponto central ( (NUM_SENSORES_LINHA-1)*1000 / 2 )
-        if (g_ultimo_erro < 2500) {
-            return 0; // Perdeu pela esquerda
+        // e retorna o valor mínimo ou máximo. O centro é SENSOR_POSICAO_CENTRO
+        // ((NUM_SENSORES_LINHA-1)*1000/2 = 5500 com 12 sensores).
+        if (g_ultimo_erro < SENSOR_POSICAO_CENTRO) {
+            return SENSOR_POSICAO_MIN; // Perdeu pela direita
         } else {
-            return 5000; // Perdeu pela direita
+            return SENSOR_POSICAO_MAX; // Perdeu pela esquerda
         }
     }
 
     last_value = avg / sum;
     g_ultimo_erro = last_value; // Atualiza a última posição válida conhecida
 
-    return last_value; // Retorna o valor bruto (entre 0 e 5000)
+    return last_value; // Retorna o valor bruto (entre SENSOR_POSICAO_MIN e SENSOR_POSICAO_MAX)
 }
 
 
@@ -172,3 +188,10 @@ bool sensor_linha_is_robo_fora_da_pista(int pos_mapeada) {
     return (g_contador_linha_perdida_ms >= TEMPO_MAX_LINHA_PERDIDA_MS);
 }
 
+void sensor_linha_depuracao(void) {
+    printf("Dir:%4u |", g_adc_buffer[IDX_LATERAL_DIREITO]);
+    for (uint8_t j = 1; j <= NUM_SENSORES_LINHA; j++) {
+        printf(" %4u", g_adc_buffer[j]);
+    }
+    printf(" | Esq:%4u\r\n", g_adc_buffer[IDX_LATERAL_ESQUERDO]);
+}

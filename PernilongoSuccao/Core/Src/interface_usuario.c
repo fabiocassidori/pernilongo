@@ -86,3 +86,13 @@ void iu_bip_bloqueante(uint32_t duracao_ms)
     HAL_Delay(duracao_ms);
     HAL_GPIO_WritePin(BUZINA_GPIO_Port, BUZINA_Pin, GPIO_PIN_RESET);
 }
+
+void iu_led_verde(bool ligar)
+{
+    HAL_GPIO_WritePin(LED_G_GPIO_Port, LED_G_Pin, ligar ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+void iu_led_vermelho(bool ligar)
+{
+    HAL_GPIO_WritePin(LED_R_GPIO_Port, LED_R_Pin, ligar ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}

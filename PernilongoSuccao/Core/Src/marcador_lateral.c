@@ -52,9 +52,10 @@ void marcador_lateral_calibrar_ciclo(void) {
     }
 
     // Lê os valores brutos atuais dos sensores laterais a partir do buffer DMA
-    // O sensor direito está no índice 0 e o esquerdo no índice 7 do buffer ADC
-    uint16_t valor_atual_dir = g_adc_buffer[0];
-    uint16_t valor_atual_esq = g_adc_buffer[7];
+    // Sensor direito (SLDIR, PC0) no índice IDX_LATERAL_DIREITO e esquerdo (SLESQ, PB1)
+    // no índice IDX_LATERAL_ESQUERDO do buffer ADC (ver config_robo.h)
+    uint16_t valor_atual_dir = g_adc_buffer[IDX_LATERAL_DIREITO];
+    uint16_t valor_atual_esq = g_adc_buffer[IDX_LATERAL_ESQUERDO];
 
     // Atualiza os valores mínimo e máximo para o sensor direito
     if (valor_atual_dir < g_calib_min_dir) {
@@ -105,8 +106,8 @@ TipoMarcador marcador_lateral_verificar(void) {
 	if (!g_adc_buffer) {
         return MARCADOR_NENHUM;
     }
-	 bool dir_agora = (g_adc_buffer[0] < g_limiar_calibrado_dir);
-	 bool esq_agora = (g_adc_buffer[7] < g_limiar_calibrado_esq);
+	 bool dir_agora = (g_adc_buffer[IDX_LATERAL_DIREITO] < g_limiar_calibrado_dir);
+	 bool esq_agora = (g_adc_buffer[IDX_LATERAL_ESQUERDO] < g_limiar_calibrado_esq);
 
     int estado_leitura_atual = 0;
     if (esq_agora) estado_leitura_atual |= 1; // Bit 0 para a esquerda
@@ -157,6 +158,6 @@ TipoMarcador marcador_lateral_verificar(void) {
 }
 
 void depuracao_sensores_laterais(){
-	printf("Sensores Laterais | Esq: %u, Dir: %u\r\n", g_adc_buffer[7], g_adc_buffer[0]);
+	printf("Sensores Laterais | Esq: %u, Dir: %u\r\n", g_adc_buffer[IDX_LATERAL_ESQUERDO], g_adc_buffer[IDX_LATERAL_DIREITO]);
 	HAL_Delay(500);
 }
