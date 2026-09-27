@@ -177,8 +177,35 @@
 /*
  * Na placa atual os LEDs IR da régua só acendem via Q5 (J4 pino 16).
  * Se PA8 ficar em nível baixo a régua não enxerga nada.
- * Mantida a lógica original (emissores sempre acesos). A pulsagem para
- * rejeição de luz ambiente é uma evolução futura — PA8 também é TIM1_CH1.
+ *
+ * PULSAGEM (rejeição de luz ambiente): técnica padrão em seguidores de linha
+ * de alta performance (ex.: EVA-RT, vencedor All Chile 2025 — o mesmo Q5/PA8
+ * desta placa já nasceu pensado para pulsar os emissores). O princípio:
+ *   1. liga o LED, espera estabilizar, lê o sensor (valor = luz do LED + ambiente)
+ *   2. desliga o LED, espera estabilizar, lê de novo (valor = só luz ambiente)
+ *   3. usa a DIFERENÇA -> cancela a luz ambiente (sol, lâmpadas, etc.)
+ * Isso é feito a cada leitura de posição (1 kHz), de forma transparente para
+ * o resto do código — calibração, PID e o restante do firmware não mudam.
+ *
+ * Só os 12 QRE1113 da régua são pulsados (cátodo comum no MOSFET Q5). Os 2
+ * sensores laterais são RPR-220 com LED sempre ligado por resistor próprio
+ * (R14/R17), fisicamente independentes de PA8 — não pulsam e não precisam.
+ */
+#define SENSOR_PULSADO 1
+/*
+ * Tempo de espera após cada troca de estado do LED, antes de amostrar.
+ * Soma dois fatores, ambos já levantados nesta conversa:
+ *   - resposta do fototransistor QRE1113 (datasheet): ~10 us
+ *   - tempo para o DMA do ADC1 completar 1 varredura nova dos 14 canais:
+ *     ADC a 21 MHz (PCLK2/4), 15+11 ciclos por canal (10 bits) x 14 canais
+ *     = ~17.3 us
+ * 40 us cobre os dois com folga. Ajuste aqui se notar ruído na posição.
+ */
+#define PULSO_TEMPO_ESTAB_US 40
+
+/*
+ * Usado somente se SENSOR_PULSADO=0 (fallback ao comportamento antigo:
+ * emissores sempre acesos, sem cancelamento de luz ambiente).
  */
 #define EMISSORES_SEMPRE_ACESOS 1
 

@@ -41,4 +41,11 @@ bool sensor_linha_is_robo_fora_da_pista(int pos_mapeada);
  */
 void sensor_linha_depuracao(void);
 
+/**
+ * @brief Imprime, para cada QTR, o valor com LED aceso, apagado e a diferença
+ * usada na leitura (aceso-apagado, cancelando luz ambiente). Só tem efeito
+ * com SENSOR_PULSADO=1. Útil para calibrar PULSO_TEMPO_ESTAB_US na bancada.
+ */
+void sensor_linha_depuracao_pulso(void);
+
 #endif /* INC_SENSOR_LINHA_H_ */
