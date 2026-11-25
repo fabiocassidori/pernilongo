@@ -2,7 +2,16 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
+  * @brief          : Pernilongo 5 - seguidor de linha (robotrace) sem encoder
+  *
+  * STM32F405RG a 168 MHz (HSI 16 MHz + PLL). O codigo do robo fica nos
+  * modulos (robo.c, sensor_linha.c, ...). Aqui so ha a configuracao gerada
+  * pelo CubeMX e os ajustes nos blocos USER CODE:
+  *   - PA15 (succao) forcado em 0 antes do HAL_Init e depois das inits;
+  *   - pull-up interno no botao PB4 e PA8 com borda mais rapida;
+  *   - prioridades das interrupcoes (DMA do ADC acima de tudo);
+  *   - TIM6 (1 kHz) chama robo_tick_1ms_isr().
+  * Veja a wiki (README.md) para a explicacao completa.
   ******************************************************************************
   * @attention
   *
@@ -21,18 +30,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "stm32f4xx_hal.h"
 #include <stdio.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include <stdlib.h>
 #include "config_robo.h"
-#include "controle_motor.h"
+#include "robo.h"
 #include "controle_succao.h"
-#include "sensor_linha.h"
-#include "marcador_lateral.h"
-#include "controlador_pid.h"
-#include "interface_usuario.h"
 #include "comunicacao_bluetooth.h"
 /* USER CODE END Includes */
 
@@ -62,31 +63,7 @@ TIM_HandleTypeDef htim8;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
-/*
- * Máquina de estados simplificada em relação ao código original:
- * sem encoders não há mapeamento de pista, aceleração em retas por distância
- * nem desaceleração por velocidade medida. O restante do fluxo é o mesmo.
- */
-typedef enum {
-    ESTADO_INICIO,
-    ESTADO_CALIBRANDO,
-    ESTADO_AGUARDANDO_CORRIDA,
-    ESTADO_CORRIDA,
-    ESTADO_FORA_DA_PISTA,
-    ESTADO_FINALIZADO,
-    ESTADO_FRENANDO_FINAL,
-    ESTADO_AGUARDANDO_REINICIO,
-    ESTADO_ERRO
-} EstadoRobo;
 
-static volatile EstadoRobo g_estado_robo = ESTADO_INICIO;
-static uint8_t g_fim_corrida = 0;
-volatile bool g_flag_loop_1ms = false;
-volatile bool g_flag_loop_10ms = false;
-static volatile int g_contador_loop_lento = 0;
-static volatile int g_contador_frenagem_ms = 0;
-long range_posicao_sensor = SENSOR_POSICAO_MAX - SENSOR_POSICAO_MIN;
-long range_posicao_interpolada = POSICAO_ENTRADA_MAX - POSICAO_ENTRADA_MIN;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -99,10 +76,7 @@ static void MX_TIM6_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
-void executar_loop_rapido(int pos_mapeada);
-void executar_loop_lento(void);
-static void aguardar_ms_atualizando(uint32_t duracao_ms);
-static void desligar_tudo(void);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -118,7 +92,9 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  /* PRIMEIRA instrucao: o PA15 sai do reset como JTDI com pull-up e liga o
+   * motor de succao (gate do Q3 em ~1,8 V). Forca saida em 0 ja aqui. */
+  succao_forcar_desligado();
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -146,135 +122,31 @@ int main(void)
   MX_TIM2_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-    iu_inicializar();
-    motor_inicializar(&htim8);
-    succao_inicializar(&htim2);
-    sensor_linha_inicializar(&hadc1);
-    marcador_lateral_inicializar(sensor_linha_obter_buffer_dma());
-    pid_inicializar();
-    bt_inicializar(&huart1);
-    motor_parar(true);
-    HAL_TIM_Base_Start_IT(&htim6);
+  /* O MX_TIM2_Init (HAL_TIM_MspPostInit) pos o PA15 em AF1: desliga de novo */
+  succao_forcar_desligado();
+
+  /* Prioridades (grupo 4: 0 = mais urgente)
+   *  0 DMA2_Stream0 (ADC1): a pulsagem dos emissores precisa de tempo exato
+   *  1 TIM6 (1 kHz): so levanta flags
+   *  2 USART1 (Bluetooth)
+   * 15 SysTick (HAL_GetTick) */
+  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 1, 0);
+  HAL_NVIC_SetPriority(USART1_IRQn, 2, 0);
+
+  robo_inicializar(&hadc1, &htim8, &htim2, &huart1);
+  HAL_TIM_Base_Start_IT(&htim6);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while (1){
+  while (1)
+  {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-//	  sensor_linha_depuracao();          // Descomente para ver os 14 canais na bancada
-//	  HAL_Delay(200);
-
-	  // --- LOOP RÁPIDO (1ms) ---
-	      if (g_flag_loop_1ms) {
-	        g_flag_loop_1ms = false;
-			int pos_bruta = sensor_linha_ler_posicao();
-			int pos_mapeada = (int)(((long)(pos_bruta - SENSOR_POSICAO_MIN) * range_posicao_interpolada) / range_posicao_sensor + POSICAO_ENTRADA_MIN);
-
-	          if (g_estado_robo == ESTADO_CORRIDA) {
-	        	  //Verifica se saiu fora da pista
-	        	  if (sensor_linha_is_robo_fora_da_pista(pos_mapeada)) {
-					 // Se saiu, muda o estado e para os motores.
-					 g_estado_robo = ESTADO_FORA_DA_PISTA;
-					 desligar_tudo();
-				 } else {
-					 executar_loop_rapido(pos_mapeada);
-				 }
-	          } else if (g_estado_robo == ESTADO_FRENANDO_FINAL) {
-	        	  executar_loop_rapido(pos_mapeada);
-	          }
-	      }
-
-		   //--- LOOP LENTO (10ms) ---
-		  if (g_flag_loop_10ms) {
-			  g_flag_loop_10ms = false;
-			  iu_atualizar();      // Atualiza buzina
-			  succao_atualizar();  // Rampa do ventilador
-			  if (g_estado_robo == ESTADO_CORRIDA) {
-				  executar_loop_lento(); // Verifica marcadores de pista
-			  }
-		  }
-
-		  // Máquina de estados principal
-	  	  switch (g_estado_robo) {
-	  		  case ESTADO_INICIO:
-	  			  iu_led_verde(false);
-	  			  iu_led_vermelho(false);
-	  			  printf("Pressione o botao para calibrar.\r\n");
-	  			  iu_aguardar_botao();
-	  			  iu_bip_bloqueante(100);
-	  			  g_estado_robo = ESTADO_CALIBRANDO;
-	  			  break;
-
-	  		  case ESTADO_CALIBRANDO:
-	  			  iu_led_vermelho(true);   // Calibrando: mova o robô sobre a linha
-	  			  marcador_lateral_resetar_calibracao();
-	  			  sensor_linha_calibrar();
-	  			  marcador_lateral_finalizar_calibracao();
-	  			  iu_led_vermelho(false);
-	  			  g_estado_robo = ESTADO_AGUARDANDO_CORRIDA;
-	  			  break;
-
-	  		  case ESTADO_AGUARDANDO_CORRIDA:
-	  			  iu_led_verde(true);      // Pronto para largar
-	  			  printf("Pressione para iniciar a corrida.\r\n");
-	  			  iu_aguardar_botao();
-	  			  iu_buzina_temporizada(150);
-	  			  // Liga a sucção no botão: ela sobe em rampa durante a espera.
-	  			  succao_definir_potencia(POTENCIA_SUCCAO_PCT);
-	  			  aguardar_ms_atualizando(TEMPO_ESPERA_LARGADA_MS);
-	  			  pid_inicializar();
-	  			  g_fim_corrida = 0;
-	  			  motor_parar(false);
-	  			  g_estado_robo = ESTADO_CORRIDA;
-	  			  break;
-
-	  		  case ESTADO_CORRIDA:
-	  			  break;
-
-	  		  case ESTADO_FORA_DA_PISTA:
-				  desligar_tudo(); // Mantém os motores e a sucção desligados
-				  iu_led_verde(false);
-				  iu_led_vermelho(true);
-				  printf("ROBO PERDEU A LINHA!\r\n");
-				  iu_buzina_temporizada(200);
-				  iu_atualizar();
-				  iu_aguardar_botao();
-				  HAL_Delay(400);
-				  //Reseta a um estado inicial seguro
-				  g_estado_robo = ESTADO_INICIO;
-				  break;
-
-	  		  case ESTADO_FINALIZADO:
-	  			  // Inicia a frenagem por contra-corrente (tratada no loop rápido)
-	  			  g_contador_frenagem_ms = TEMPO_FRENAGEM_MS;
-	  			  g_estado_robo = ESTADO_FRENANDO_FINAL;
-	  			  break;
-
-	  		  case ESTADO_FRENANDO_FINAL:
-	  			  // A transição é feita pelo loop rápido quando o tempo de frenagem acaba.
-	  			  break;
-
-	  		  case ESTADO_AGUARDANDO_REINICIO:
-	  			  iu_led_verde(false);
-	  			  printf("Corrida finalizada. Pressione o botao para reiniciar.\r\n");
-	  			  iu_aguardar_botao();
-	  			  g_estado_robo = ESTADO_INICIO;
-	  			  break;
-
-	  		  case ESTADO_ERRO:
-	  			   desligar_tudo();
-	  			   iu_led_vermelho(true);
-	  			   printf("ERRO! Sistema parado.\n");
-	  			   while(1) {
-	  				   iu_buzina_temporizada(100);
-	                   iu_atualizar();
-	  				   HAL_Delay(500);
-	  			   }
-	  			  break;
-	  	    }
-	      }
+    robo_executar();
+  }
   /* USER CODE END 3 */
 }
 
@@ -776,104 +648,39 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(BOTAO_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
+  /* Botao sem pull-up externo na placa: liga o pull-up interno do PB4
+   * (depois do reset o PB4 e o NJTRST; o MX_GPIO_Init acima tira o pull). */
+  GPIO_InitStruct.Pin = BOTAO_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(BOTAO_GPIO_Port, &GPIO_InitStruct);
+
+  /* PA8 (emissores IR via Q5) com borda mais rapida: a troca aceso/apagado
+   * fica bem definida no tempo (validado no main_qtr_pulsado.c). */
+  GPIO_InitStruct.Pin = PWM_SENSOR_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_MEDIUM;
+  HAL_GPIO_Init(PWM_SENSOR_GPIO_Port, &GPIO_InitStruct);
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-void executar_loop_rapido(int pos_mapeada) {
-
-    // ESTADO DE CORRIDA: mesma lógica do original (potência base ± correção do PID),
-    // porém em malha aberta, pois não há encoders para medir a velocidade.
-	if (g_estado_robo == ESTADO_CORRIDA) {
-		int correcao_direcao = pid_calcular_correcao(pos_mapeada);
-		motor_definir_potencia(POTENCIA_BASE_CORRIDA - correcao_direcao, POTENCIA_BASE_CORRIDA + correcao_direcao);
-	}
-    // FRENAGEM FINAL: contra-corrente por TEMPO_FRENAGEM_MS e depois desliga tudo
-	else if (g_estado_robo == ESTADO_FRENANDO_FINAL) {
-		if (g_contador_frenagem_ms > 0) {
-			motor_frear();
-		} else {
-			desligar_tudo();
-			iu_buzina_temporizada(1000); // Som de finalização
-			g_estado_robo = ESTADO_AGUARDANDO_REINICIO;
-		}
-	}
-}
-
-// Loop de 10ms
-void executar_loop_lento(void) {
-    // Contém a verificação de marcadores e outras tarefas não críticas
-    TipoMarcador marcador = marcador_lateral_verificar();
-    if (marcador == MARCADOR_NENHUM) {
-        return;
-    }
-
-	if (marcador == MARCADOR_ESQUERDA || marcador == MARCADOR_DIREITA) {
-		iu_buzina_temporizada(30);
-		if (marcador == MARCADOR_DIREITA) {
-			iu_buzina_temporizada(100);
-			g_fim_corrida++;
-		}
-		// Verificação de fim de corrida (largada + chegada)
-		if (g_fim_corrida >= MARCADORES_DIREITA_FIM_CORRIDA) {
-			g_estado_robo = ESTADO_FINALIZADO;
-		}
-	} else if (marcador == MARCADOR_AMBOS) {
-		//iu_buzina_temporizada(100);   // Cruzamento: ignorado, como no original
-	}
-}
-
-/* Desliga motores (DIS alto) e sucção. */
-static void desligar_tudo(void) {
-	motor_parar(true);
-	succao_desligar();
-}
-
-/* Espera sem bloquear a rampa da sucção nem a buzina (substitui HAL_Delay). */
-static void aguardar_ms_atualizando(uint32_t duracao_ms) {
-	uint32_t inicio = HAL_GetTick();
-	while ((HAL_GetTick() - inicio) < duracao_ms) {
-		if (g_flag_loop_10ms) {
-			g_flag_loop_10ms = false;
-			iu_atualizar();
-			succao_atualizar();
-		}
-	}
-}
-
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-	if (htim->Instance == TIM6) {
-		// A interrupção acontece a cada 1ms
-		// 1. Aciona o loop rápido toda vez
-		g_flag_loop_1ms = true;
-
-		// 2. Decrementa o timer de frenagem se ele estiver ativo
-		   if (g_contador_frenagem_ms > 0) {
-			   g_contador_frenagem_ms--;
-		   }
-
-		/*3. O timer para lógica de reconhecimento de linha perdida
-		   no arquivo sensor_linha.c*/
-		   sensor_linha_tick_1ms();
-
-		// 4. Usa um contador para acionar o loop lento a cada 10ms
-		g_contador_loop_lento++;
-		if (g_contador_loop_lento >= 10) {
-		  g_flag_loop_10ms = true;
-		  g_contador_loop_lento = 0;
-		}
-	  }
+  if (htim->Instance == TIM6) {
+    robo_tick_1ms_isr();             /* 1 kHz: 84 MHz / 8400 / 10 */
+  }
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-	bt_callback_rx(huart);
+  bt_callback_rx(huart);
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-	bt_callback_erro(huart);
+  bt_callback_erro(huart);
 }
 /* USER CODE END 4 */
 
@@ -884,8 +691,13 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
+  /* Estado seguro: succao e motores desligados direto nos registradores */
   __disable_irq();
+  succao_forcar_desligado();
+  if (RCC->APB2ENR & RCC_APB2ENR_TIM8EN) { TIM8->CCR1 = 0; TIM8->CCR2 = 0; }
+  RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
+  GPIOB->BSRR = DIS_Pin;             /* DIS = 1: pontes em tristate */
+  GPIOB->BSRR = LED_R_Pin;           /* LED vermelho aceso = erro   */
   while (1)
   {
   }

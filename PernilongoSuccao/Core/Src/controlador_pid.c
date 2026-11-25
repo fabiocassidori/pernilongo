@@ -1,42 +1,39 @@
 /*
  * controlador_pid.c
- *
- *  Created on: Jun 5, 2025
- *      Author: Fábio Couto
  */
 
 #include "controlador_pid.h"
 #include "config_robo.h"
-#include <stdint.h>
 
-static int g_ultimo_erro_pid = 0;
+static int16_t g_erro_anterior = 0;
+static float   g_p = 0.0f, g_d = 0.0f;
 
-static int calcular(int posicao_atual, int kp, int kd, int ki, int divisor, int* ptr_ultimo_erro);
-
-void pid_inicializar(void) {
-    g_ultimo_erro_pid = 0;
+void pid_inicializar(void)
+{
+    pid_resetar(0);
 }
 
-int pid_calcular_correcao(int posicao_atual) {
-    return calcular(posicao_atual, PID_KP, PID_KD, PID_KI, PID_DIVISOR, &g_ultimo_erro_pid);
+void pid_resetar(int16_t erro_inicial)
+{
+    /* Com o erro anterior igual ao atual o termo D da 1a leitura e zero:
+     * evita um "chute" na largada. */
+    g_erro_anterior = erro_inicial;
+    g_p = g_d = 0.0f;
 }
 
-int pid_calcular_correcao_customizada(int posicao_atual, int kp, int kd) {
-    return calcular(posicao_atual, kp, kd, 0, PID_DIVISOR, &g_ultimo_erro_pid);
+int16_t pid_calcular(int16_t erro)
+{
+    int32_t delta = (int32_t)erro - (int32_t)g_erro_anterior;
+    g_erro_anterior = erro;
+
+    g_p = PID_KP * (float)erro;
+    g_d = PID_KD * (float)delta;
+    float u = g_p + g_d;
+
+    if (u >  (float)PID_LIMITE_SAIDA) u =  (float)PID_LIMITE_SAIDA;
+    if (u < -(float)PID_LIMITE_SAIDA) u = -(float)PID_LIMITE_SAIDA;
+    return (int16_t)u;
 }
 
-static int calcular(int posicao_atual, int kp, int kd, int ki, int divisor, int* ptr_ultimo_erro) {
-    int erro = posicao_atual - PID_SETPOINT;
-    int derivativo = erro - *ptr_ultimo_erro;
-    *ptr_ultimo_erro = erro;
-
-    int32_t termo_p = (int32_t)erro * kp;
-    int32_t termo_d = (int32_t)derivativo * kd;
-
-    int correcao = (int)((termo_p + termo_d) / divisor);
-
-    if (correcao > PID_LIMITE_SAIDA) correcao = PID_LIMITE_SAIDA;
-    if (correcao < -PID_LIMITE_SAIDA) correcao = -PID_LIMITE_SAIDA;
-
-    return correcao;
-}
+float pid_termo_p(void) { return g_p; }
+float pid_termo_d(void) { return g_d; }
