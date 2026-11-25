@@ -139,13 +139,22 @@
 /* =============================================================================
  * 7. BATERIA (BAT_REF = PC1 = ADC2_IN11, divisor R22/R23)
  * ========================================================================== */
-#define BAT_R_SUPERIOR_OHM        18000.0f /* R22 na placa. Se trocou por 18k, mude! */
+#define BAT_R_SUPERIOR_OHM        18000.0f /* R22 (na PCB original e 15k: satura em 8,25 V) */
 #define BAT_R_INFERIOR_OHM        10000.0f /* R23 */
 #define BAT_VDDA                  3.3f
+/* Ajuste fino: (tensao no multimetro) / (bat_tensao_calc no Live Expressions).
+ * Ex.: multimetro 8,40 V e firmware 8,25 V -> 8,40/8,25 = 1,018. Fica entre 0,9 e 1,1;
+ * se der fora disso o problema e de hardware (resistor errado ou solda), nao de ajuste. */
+#define BAT_FATOR_AJUSTE          1.000f
 #define BAT_LIMIAR_BAIXA_V        7.0f    /* 2S: 3,5 V/celula em repouso */
 #define BAT_LIMIAR_BAIXA_CORRIDA_V 6.4f   /* com motores e sucao a bateria cai mais */
+#define BAT_HISTERESE_V           0.3f    /* alarme so apaga acima de limiar + 0,3 V */
 #define BAT_TEMPO_CONFIRMA_MS     2000    /* abaixo do limiar por 2 s = alarme */
+#define BAT_TEMPO_LIBERA_MS       3000    /* acima de limiar + histerese por 3 s = apaga */
+#define BAT_TEMPO_PARTIDA_MS      1000    /* ignora o 1o segundo (filtro assentando) */
 #define BAT_INTERVALO_ALARME_MS   1500    /* bip de alarme a cada 1,5 s */
+#define BAT_ALARME_HABILITADO     0       /* 0 = so mede e mostra, nunca bipa (diagnostico) */
+#define BAT_DIAGNOSTICO_PRINTF    1       /* 1 = imprime bruto/mV/V a cada 2 s fora da corrida */
 #define BAT_ALARME_NA_CORRIDA     1       /* 1 = bipa tambem durante a corrida */
 
 /* =============================================================================

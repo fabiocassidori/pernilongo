@@ -20,7 +20,8 @@ void     bateria_tick_10ms(bool em_corrida);
 float    bateria_tensao(void);        /* filtro rapido (tau ~80 ms): compensacao */
 float    bateria_tensao_lenta(void);  /* filtro lento (tau ~0,6 s): alarme       */
 bool     bateria_presente(void);      /* false = alimentado so pelo ST-LINK     */
-bool     bateria_baixa(void);         /* alarme travado ate reiniciar o robo    */
+bool     bateria_baixa(void);         /* alarme com histerese (apaga se a tensao voltar) */
 uint16_t bateria_adc(void);
+void     bateria_imprimir_diagnostico(void);  /* printf: bruto, mV no pino, Vbat, fator */
 
 #endif /* INC_BATERIA_H_ */

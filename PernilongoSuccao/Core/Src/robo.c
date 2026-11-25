@@ -298,8 +298,24 @@ static void laco_lento(void)
         if (!g_alarme_avisado && !em_corrida) {
             g_alarme_avisado = true;
             printf("BATERIA BAIXA: %.2f V. Carregue a bateria!\r\n", (double)bateria_tensao_lenta());
+            bateria_imprimir_diagnostico();
+        }
+    } else {
+        iu_alarme_bateria(false, false);           /* tensao voltou: histerese liberou */
+        if (g_alarme_avisado) {
+            g_alarme_avisado = false;
+            printf("Bateria OK de novo: %.2f V\r\n", (double)bateria_tensao_lenta());
         }
     }
+#if BAT_DIAGNOSTICO_PRINTF
+    {
+        static uint32_t t_diag = 0;
+        if (!em_corrida && (agora - t_diag) >= 2000U) {
+            t_diag = agora;
+            bateria_imprimir_diagnostico();
+        }
+    }
+#endif
 
     succao_atualizar();
     qtr_vigiar_adc();
